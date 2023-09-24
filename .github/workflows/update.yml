@@ -7,6 +7,22 @@ on:
     - cron: '0 2 * * 0'
 
   workflow_dispatch:
+    inputs:
+      only-labels:
+        description: Only run label synchronization.
+        default: true
+        type: boolean
+
+      delete-unmapped-labels:
+        description: Delete labels not mapped in either global or local label configurations.
+        default: false
+        type: boolean
+      
+      dry-run-labels:
+        description: Run label synchronization workflow without making any changes.
+        default: false
+        type: boolean
+
 
   issue_comment:
     types:
@@ -17,9 +33,14 @@ jobs:
     if: >-
       !github.event.repository.fork
       && (
-        github.event_name != 'issue_comment'
+        github.event_name == 'schedule'
         || (
-          github.event.issue.pull_request
+          github.event_name == 'workflow_dispatch'
+          && !inputs.only-labels
+        )
+        || (
+          github.event_name == 'issue_comment'
+          && github.event.issue.pull_request
           && (
             github.event.comment.body == '@conda-bot render'
             || github.event.comment.body == '@conda-bot recreate'
@@ -81,6 +102,7 @@ jobs:
 
             - `@conda-bot render` will run rendering workflows and commit and push any changes to this PR
             - `@conda-bot recreate` will recreate this PR, overwriting any edits that have been made to it
+            - `@conda-bot labels` will synchronize labels
 
             </details>
 
@@ -96,5 +118,68 @@ jobs:
         with:
           comment-id: ${{ github.event.comment.id }}
           reactions: ${{ (steps.create.conclusion == 'success' || steps.update.conclusion == 'success') && 'hooray' || 'confused' }}
+          reactions-edit-mode: replace
+          token: ${{ secrets.SYNC_TOKEN }}
+
+  labels:
+    if: >-
+      !github.event.repository.fork
+      && (
+        github.event_name == 'schedule'
+        || github.event_name == 'workflow_dispatch'
+        || (
+          github.event_name == 'issue_comment'
+          && github.event.issue.pull_request
+          && github.event.comment.body == '@conda-bot labels'
+        )
+      )
+    runs-on: ubuntu-latest
+    env:
+      GLOBAL: https://raw.githubusercontent.com/conda/infrastructure/main/.github/global.yml
+      LOCAL: .github/labels.yml
+    permissions:
+      # https://github.com/EndBug/label-sync/issues/187#issuecomment-1442103739
+      issues: write
+    steps:
+      - if: github.event_name == 'issue_comment'
+        uses: peter-evans/create-or-update-comment@v3.0.2
+        with:
+          comment-id: ${{ github.event.comment.id }}
+          reactions: eyes
+          reactions-edit-mode: replace
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - uses: actions/checkout@v4
+      
+      - id: has_local
+        uses: andstor/file-existence-action@v2.0.0
+        with:
+          files: ${{ env.LOCAL }}
+      
+      - name: Global Only
+        if: steps.has_local.outputs.files_exists == 'false'
+        id: global
+        uses: EndBug/label-sync@v2.3.2
+        with:
+          config-file: ${{ env.GLOBAL }}
+          delete-other-labels: ${{ inputs.delete-unmapped-labels || 'false' }}
+          dry-run: ${{ inputs.dry-run-labels || 'false' }}
+
+      - name: Global & Local
+        if: steps.has_local.outputs.files_exists == 'true'
+        id: local
+        uses: EndBug/label-sync@v2.3.2
+        with:
+          config-file: |
+            ${{ env.GLOBAL }}
+            ${{ env.LOCAL }}
+          delete-other-labels: ${{ inputs.delete-unmapped-labels || 'false' }}
+          dry-run: ${{ inputs.dry-run-labels || 'false' }}
+
+      - if: always() && github.event_name == 'issue_comment'
+        uses: peter-evans/create-or-update-comment@v3.0.2
+        with:
+          comment-id: ${{ github.event.comment.id }}
+          reactions: ${{ (steps.global.conclusion == 'success' || steps.local.conclusion == 'success') && 'hooray' || 'confused' }}
           reactions-edit-mode: replace
           token: ${{ secrets.SYNC_TOKEN }}
